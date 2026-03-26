@@ -1,0 +1,757 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Jump & Play!</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; font-family: 'Segoe UI', system-ui, sans-serif; background: #1a1a2e; }
+
+/* Camera feed as background */
+#camera { position: fixed; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); z-index: 0; }
+#overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; pointer-events: none; }
+
+/* Dark overlay so UI is readable over camera */
+.camera-dim { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.25); z-index: 1; }
+
+/* UI layer */
+.ui { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 10; display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: none; }
+.ui > * { pointer-events: auto; }
+
+/* Start screen */
+#start-screen { text-align: center; }
+#start-screen h1 { font-size: clamp(2.5rem, 8vw, 5rem); color: #fff; text-shadow: 0 4px 20px rgba(0,0,0,0.5); margin-bottom: 0.5em; }
+#start-screen p { font-size: clamp(1rem, 3vw, 1.5rem); color: rgba(255,255,255,0.8); margin-bottom: 1.5em; }
+.play-btn {
+  font-size: clamp(1.8rem, 5vw, 3rem); padding: 0.5em 1.5em;
+  border: none; border-radius: 2em; cursor: pointer;
+  background: linear-gradient(135deg, #ff6b6b, #ffa500); color: #fff;
+  font-weight: 700; box-shadow: 0 8px 30px rgba(255,107,107,0.4);
+  animation: pulse 2s ease-in-out infinite; transition: transform 0.2s;
+}
+.play-btn:active { transform: scale(0.95); }
+@keyframes pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.05); } }
+
+/* Prompt display */
+#prompt-area { text-align: center; display: none; }
+#prompt-icon { font-size: clamp(5rem, 20vw, 12rem); line-height: 1; margin-bottom: 0.2em; animation: bounceIn 0.5s ease-out; }
+#prompt-text {
+  font-size: clamp(1.8rem, 6vw, 3.5rem); color: #fff; font-weight: 800;
+  text-shadow: 0 4px 20px rgba(0,0,0,0.6); line-height: 1.2;
+}
+#prompt-sub {
+  font-size: clamp(1rem, 3vw, 1.5rem); color: rgba(255,255,255,0.7);
+  margin-top: 0.5em;
+}
+@keyframes bounceIn {
+  0% { transform: scale(0); opacity: 0; }
+  60% { transform: scale(1.2); }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+/* Shape display canvas */
+#shape-canvas {
+  width: clamp(120px, 35vw, 250px); height: clamp(120px, 35vw, 250px);
+  border-radius: 20px; display: none;
+  margin: 0 auto 0.5em;
+}
+
+/* Celebration */
+#celebrate { display: none; text-align: center; }
+#celebrate-emoji { font-size: clamp(5rem, 18vw, 10rem); animation: celebrateBounce 0.6s ease-out; }
+#celebrate-text { font-size: clamp(1.5rem, 5vw, 3rem); color: #fff; font-weight: 800; text-shadow: 0 4px 20px rgba(0,0,0,0.5); }
+@keyframes celebrateBounce {
+  0% { transform: scale(0) rotate(-20deg); } 50% { transform: scale(1.3) rotate(10deg); } 100% { transform: scale(1) rotate(0); }
+}
+
+/* Encouragement */
+#encourage { display: none; text-align: center; }
+#encourage-text { font-size: clamp(1.3rem, 4vw, 2.5rem); color: #ffe66d; font-weight: 700; text-shadow: 0 3px 15px rgba(0,0,0,0.5); }
+
+/* Star counter */
+#stars {
+  position: fixed; top: 1em; right: 1em; z-index: 20;
+  font-size: clamp(1.2rem, 3.5vw, 2rem); color: #ffe66d;
+  font-weight: 700; text-shadow: 0 2px 10px rgba(0,0,0,0.5);
+  display: none;
+}
+
+/* Round counter */
+#round-info {
+  position: fixed; top: 1em; left: 1em; z-index: 20;
+  font-size: clamp(0.9rem, 2.5vw, 1.3rem); color: rgba(255,255,255,0.6);
+  display: none;
+}
+
+/* Parent controls */
+#controls {
+  position: fixed; bottom: 1em; right: 1em; z-index: 20;
+  display: flex; gap: 0.5em;
+}
+.ctrl-btn {
+  width: clamp(40px, 10vw, 56px); height: clamp(40px, 10vw, 56px);
+  border: none; border-radius: 50%; cursor: pointer;
+  background: rgba(255,255,255,0.15); color: #fff;
+  font-size: clamp(1rem, 3vw, 1.5rem); backdrop-filter: blur(10px);
+  display: flex; align-items: center; justify-content: center;
+}
+.ctrl-btn:active { background: rgba(255,255,255,0.3); }
+
+/* Loading */
+#loading {
+  position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  background: #1a1a2e; z-index: 100; display: flex;
+  flex-direction: column; align-items: center; justify-content: center;
+  color: #fff; font-size: 1.3rem;
+}
+#loading .spinner {
+  width: 48px; height: 48px; border: 4px solid rgba(255,255,255,0.2);
+  border-top-color: #ff6b6b; border-radius: 50%;
+  animation: spin 0.8s linear infinite; margin-bottom: 1em;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+#load-status { color: rgba(255,255,255,0.6); margin-top: 0.5em; font-size: 0.9rem; }
+
+/* Confetti canvas */
+#confetti {
+  position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  z-index: 15; pointer-events: none;
+}
+
+/* Detection feedback dot */
+#detection-dot {
+  position: fixed; bottom: 1em; left: 1em; z-index: 20;
+  width: 12px; height: 12px; border-radius: 50%;
+  background: #555; transition: background 0.3s;
+}
+#detection-dot.active { background: #4ecdc4; }
+</style>
+</head>
+<body>
+
+<video id="camera" autoplay playsinline muted></video>
+<div class="camera-dim"></div>
+<canvas id="confetti"></canvas>
+<canvas id="overlay"></canvas>
+
+<div id="loading">
+  <div class="spinner"></div>
+  Loading game...
+  <div id="load-status"></div>
+</div>
+
+<div class="ui">
+  <div id="start-screen">
+    <h1>Jump & Play!</h1>
+    <p>A game for little ones</p>
+    <button class="play-btn" id="play-btn">Play!</button>
+  </div>
+  <div id="prompt-area">
+    <canvas id="shape-canvas"></canvas>
+    <div id="prompt-icon"></div>
+    <div id="prompt-text"></div>
+    <div id="prompt-sub"></div>
+  </div>
+  <div id="celebrate">
+    <div id="celebrate-emoji"></div>
+    <div id="celebrate-text"></div>
+  </div>
+  <div id="encourage">
+    <div id="encourage-text"></div>
+  </div>
+</div>
+
+<div id="stars"></div>
+<div id="round-info"></div>
+<div id="detection-dot"></div>
+
+<div id="controls">
+  <button class="ctrl-btn" id="mute-btn" title="Mute">&#128266;</button>
+  <button class="ctrl-btn" id="restart-btn" title="Restart">&#8634;</button>
+</div>
+
+<script type="module">
+// ─── MediaPipe Imports ───────────────────────────────────
+import { FaceLandmarker, HandLandmarker, PoseLandmarker, FilesetResolver }
+  from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs';
+
+// ─── DOM refs ────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const video = $('camera');
+const confettiCanvas = $('confetti');
+const confettiCtx = confettiCanvas.getContext('2d');
+const shapeCanvas = $('shape-canvas');
+const shapeCtx = shapeCanvas.getContext('2d');
+
+// ─── State ───────────────────────────────────────────────
+let state = 'loading'; // loading | start | prompting | detecting | celebrating | encouraging
+let round = 0;
+let stars = 0;
+let muted = false;
+let currentPrompt = null;
+let detectStart = 0;
+let encourageShown = false;
+let faceLandmarker, handLandmarker, poseLandmarker;
+let lastFrameTime = 0;
+let recognition = null; // SpeechRecognition instance
+let animFrame = null;
+
+// ─── Audio ───────────────────────────────────────────────
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+function playTone(freq, duration, type = 'sine') {
+  if (muted) return;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = type;
+  osc.frequency.value = freq;
+  gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+  osc.connect(gain).connect(audioCtx.destination);
+  osc.start(); osc.stop(audioCtx.currentTime + duration);
+}
+
+function playSuccess() {
+  playTone(523, 0.15); // C
+  setTimeout(() => playTone(659, 0.15), 100); // E
+  setTimeout(() => playTone(784, 0.3), 200); // G
+}
+
+function playEncourage() {
+  playTone(440, 0.2, 'triangle');
+}
+
+// ─── Speech ──────────────────────────────────────────────
+function speak(text) {
+  if (muted) return;
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.rate = 0.85;
+  u.pitch = 1.3;
+  u.volume = 1;
+  speechSynthesis.speak(u);
+}
+
+function startListening(expectedWords, onMatch) {
+  if (!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
+    // No speech recognition -- auto-pass after delay
+    setTimeout(onMatch, 4000);
+    return;
+  }
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  recognition = new SR();
+  recognition.continuous = true;
+  recognition.interimResults = true;
+  recognition.lang = 'en-US';
+  recognition.onresult = (e) => {
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const transcript = e.results[i][0].transcript.toLowerCase().trim();
+      for (const word of expectedWords) {
+        if (transcript.includes(word.toLowerCase())) {
+          stopListening();
+          onMatch();
+          return;
+        }
+      }
+    }
+  };
+  recognition.onerror = () => {};
+  recognition.onend = () => {
+    // Restart if we're still detecting
+    if (state === 'detecting' && recognition) {
+      try { recognition.start(); } catch(e) {}
+    }
+  };
+  try { recognition.start(); } catch(e) {}
+}
+
+function stopListening() {
+  if (recognition) {
+    try { recognition.abort(); } catch(e) {}
+    recognition = null;
+  }
+}
+
+// ─── Confetti ────────────────────────────────────────────
+let confettiPieces = [];
+const COLORS = ['#ff6b6b','#ffa500','#ffe66d','#4ecdc4','#a78bfa','#ff8ed4','#6bcb77'];
+
+function resizeConfetti() {
+  confettiCanvas.width = window.innerWidth;
+  confettiCanvas.height = window.innerHeight;
+}
+
+function spawnConfetti() {
+  confettiPieces = [];
+  for (let i = 0; i < 80; i++) {
+    confettiPieces.push({
+      x: Math.random() * confettiCanvas.width,
+      y: -20 - Math.random() * 200,
+      w: 8 + Math.random() * 8,
+      h: 4 + Math.random() * 6,
+      color: COLORS[Math.floor(Math.random() * COLORS.length)],
+      vx: (Math.random() - 0.5) * 4,
+      vy: 2 + Math.random() * 4,
+      rot: Math.random() * Math.PI * 2,
+      vr: (Math.random() - 0.5) * 0.3
+    });
+  }
+}
+
+function drawConfetti() {
+  confettiCtx.clearRect(0, 0, confettiCanvas.width, confettiCanvas.height);
+  let alive = false;
+  for (const p of confettiPieces) {
+    if (p.y > confettiCanvas.height + 20) continue;
+    alive = true;
+    p.x += p.vx; p.y += p.vy; p.rot += p.vr; p.vy += 0.1;
+    confettiCtx.save();
+    confettiCtx.translate(p.x, p.y);
+    confettiCtx.rotate(p.rot);
+    confettiCtx.fillStyle = p.color;
+    confettiCtx.fillRect(-p.w/2, -p.h/2, p.w, p.h);
+    confettiCtx.restore();
+  }
+  if (alive) requestAnimationFrame(drawConfetti);
+}
+
+// ─── Shape Drawing ───────────────────────────────────────
+const SHAPES = {
+  circle:   { name: 'circle',   words: ['circle', 'round', 'ball'], color: '#ff6b6b' },
+  star:     { name: 'star',     words: ['star'],                    color: '#ffe66d' },
+  heart:    { name: 'heart',    words: ['heart', 'love'],           color: '#ff8ed4' },
+  triangle: { name: 'triangle', words: ['triangle'],                color: '#4ecdc4' },
+  square:   { name: 'square',   words: ['square', 'box'],           color: '#a78bfa' },
+};
+
+const SHAPE_COLORS = {
+  red:    '#ff6b6b',
+  blue:   '#4e9af1',
+  green:  '#6bcb77',
+  yellow: '#ffe66d',
+  purple: '#a78bfa',
+  orange: '#ffa500',
+  pink:   '#ff8ed4',
+};
+
+function drawShape(shapeName, color) {
+  const s = shapeCanvas.width;
+  shapeCanvas.style.display = 'block';
+  shapeCtx.clearRect(0, 0, s, s);
+  shapeCtx.fillStyle = color;
+  shapeCtx.strokeStyle = '#fff';
+  shapeCtx.lineWidth = 4;
+  const cx = s/2, cy = s/2, r = s * 0.38;
+
+  switch (shapeName) {
+    case 'circle':
+      shapeCtx.beginPath(); shapeCtx.arc(cx, cy, r, 0, Math.PI*2);
+      shapeCtx.fill(); shapeCtx.stroke(); break;
+    case 'square':
+      shapeCtx.beginPath(); shapeCtx.rect(cx-r, cy-r, r*2, r*2);
+      shapeCtx.fill(); shapeCtx.stroke(); break;
+    case 'triangle':
+      shapeCtx.beginPath();
+      shapeCtx.moveTo(cx, cy - r);
+      shapeCtx.lineTo(cx + r, cy + r*0.8);
+      shapeCtx.lineTo(cx - r, cy + r*0.8);
+      shapeCtx.closePath(); shapeCtx.fill(); shapeCtx.stroke(); break;
+    case 'star': {
+      shapeCtx.beginPath();
+      for (let i = 0; i < 5; i++) {
+        const angle = (i * 4 * Math.PI / 5) - Math.PI/2;
+        const x = cx + r * Math.cos(angle);
+        const y = cy + r * Math.sin(angle);
+        i === 0 ? shapeCtx.moveTo(x, y) : shapeCtx.lineTo(x, y);
+      }
+      shapeCtx.closePath(); shapeCtx.fill(); shapeCtx.stroke(); break;
+    }
+    case 'heart': {
+      shapeCtx.beginPath();
+      const top = cy - r * 0.4;
+      shapeCtx.moveTo(cx, cy + r * 0.7);
+      shapeCtx.bezierCurveTo(cx - r*1.2, cy - r*0.2, cx - r*0.7, top - r*0.5, cx, top + r*0.3);
+      shapeCtx.bezierCurveTo(cx + r*0.7, top - r*0.5, cx + r*1.2, cy - r*0.2, cx, cy + r*0.7);
+      shapeCtx.fill(); shapeCtx.stroke(); break;
+    }
+  }
+}
+
+// ─── Prompt Definitions ──────────────────────────────────
+function getPromptsForLevel(level) {
+  const prompts = [];
+
+  // Always available: smile, jump
+  prompts.push(
+    { type: 'smile', icon: '😊', text: 'Show me a BIG SMILE!', voice: 'Show me a big smile!', sub: '' },
+    { type: 'jump',  icon: '🦘', text: 'Can you JUMP?',       voice: 'Can you jump?',        sub: '' },
+  );
+
+  if (level >= 2) {
+    for (let n = 1; n <= Math.min(3, level >= 4 ? 5 : 3); n++) {
+      const fingerWord = n === 1 ? 'finger' : 'fingers';
+      prompts.push({
+        type: 'fingers', count: n,
+        icon: ['','☝️','✌️','🤟','🖖','🖐️'][n],
+        text: `Hold up ${n} ${fingerWord}!`,
+        voice: `Hold up ${n} ${fingerWord}!`,
+        sub: '',
+      });
+    }
+  }
+  if (level >= 3) {
+    const shapeKeys = Object.keys(SHAPES);
+    for (const k of shapeKeys) {
+      prompts.push({
+        type: 'shape', shape: k,
+        icon: '', text: 'What shape is this?',
+        voice: 'What shape is this?',
+        sub: `Say "${SHAPES[k].name}"`,
+      });
+    }
+  }
+  if (level >= 4) {
+    // Add fingers 4-5
+    for (let n = 4; n <= 5; n++) {
+      prompts.push({
+        type: 'fingers', count: n,
+        icon: n === 4 ? '🖖' : '🖐️',
+        text: `Hold up ${n} fingers!`,
+        voice: `Hold up ${n} fingers!`,
+        sub: '',
+      });
+    }
+  }
+  return prompts;
+}
+
+function getLevel() {
+  if (round < 3) return 1;
+  if (round < 6) return 2;
+  if (round < 9) return 3;
+  return 4;
+}
+
+function pickPrompt() {
+  const level = getLevel();
+  const prompts = getPromptsForLevel(level);
+  return prompts[Math.floor(Math.random() * prompts.length)];
+}
+
+// ─── Detection Logic ─────────────────────────────────────
+let baselineY = null;
+let poseHistory = [];
+
+function detectSmile(faceLandmarks) {
+  if (!faceLandmarks || faceLandmarks.length === 0) return false;
+  const lm = faceLandmarks[0];
+  // Mouth corners: 61 (left), 291 (right)
+  // Upper lip: 13, Lower lip: 14
+  const mouthWidth = Math.abs(lm[291].x - lm[61].x);
+  const mouthHeight = Math.abs(lm[14].y - lm[13].y);
+  const faceWidth = Math.abs(lm[454].x - lm[234].x);
+  const ratio = mouthWidth / faceWidth;
+  // A smile widens the mouth relative to face width
+  return ratio > 0.38 && mouthHeight > 0.01;
+}
+
+function detectJump(poseLandmarks) {
+  if (!poseLandmarks || poseLandmarks.length === 0) return false;
+  const lm = poseLandmarks[0];
+  // Use nose (0) or left shoulder (11) Y position
+  const noseY = lm[0].y;
+  poseHistory.push(noseY);
+  if (poseHistory.length > 30) poseHistory.shift();
+
+  if (poseHistory.length < 10) return false;
+
+  // Establish baseline as the average of first frames
+  if (baselineY === null) {
+    baselineY = poseHistory.slice(0, 5).reduce((a,b) => a+b, 0) / 5;
+  }
+
+  // Detect upward movement (Y decreases = up in normalized coords)
+  const recentMin = Math.min(...poseHistory.slice(-8));
+  const jump = baselineY - recentMin > 0.04; // ~4% of frame height
+  if (jump) { baselineY = null; poseHistory = []; }
+  return jump;
+}
+
+function countFingers(handLandmarks) {
+  if (!handLandmarks || handLandmarks.length === 0) return 0;
+  let total = 0;
+  for (const hand of handLandmarks) {
+    let fingers = 0;
+    // Thumb: compare tip (4) x to IP (3) x (depends on hand side)
+    // For simplicity, check if thumb tip is far from palm
+    const thumbTip = hand[4];
+    const thumbIp = hand[3];
+    const wrist = hand[0];
+    const indexMcp = hand[5];
+    // Determine hand orientation
+    const isRight = indexMcp.x < wrist.x; // roughly
+    if (isRight ? (thumbTip.x < thumbIp.x) : (thumbTip.x > thumbIp.x)) fingers++;
+
+    // Other fingers: tip Y < PIP Y (tip is above PIP = extended)
+    const tips = [8, 12, 16, 20];
+    const pips = [6, 10, 14, 18];
+    for (let i = 0; i < 4; i++) {
+      if (hand[tips[i]].y < hand[pips[i]].y) fingers++;
+    }
+    total += fingers;
+  }
+  return total;
+}
+
+// ─── Game Flow ───────────────────────────────────────────
+function showScreen(id) {
+  for (const s of ['start-screen','prompt-area','celebrate','encourage']) {
+    $(s).style.display = s === id ? 'flex' : 'none';
+    if (s === id) $(s).style.display = 'block';
+  }
+}
+
+function startGame() {
+  round = 0; stars = 0;
+  $('stars').style.display = 'block';
+  $('round-info').style.display = 'block';
+  updateUI();
+  nextRound();
+}
+
+function updateUI() {
+  $('stars').textContent = '⭐'.repeat(Math.min(stars, 20)) + (stars > 0 ? ` ${stars}` : '');
+  $('round-info').textContent = `Round ${round + 1}`;
+}
+
+function nextRound() {
+  currentPrompt = pickPrompt();
+  encourageShown = false;
+  updateUI();
+
+  // Show prompt
+  state = 'prompting';
+  showScreen('prompt-area');
+
+  // Shape display
+  if (currentPrompt.type === 'shape') {
+    const s = SHAPES[currentPrompt.shape];
+    const size = Math.min(window.innerWidth * 0.35, 250);
+    shapeCanvas.width = size; shapeCanvas.height = size;
+    drawShape(currentPrompt.shape, s.color);
+    $('prompt-icon').textContent = '';
+    $('prompt-icon').style.display = 'none';
+    shapeCanvas.style.display = 'block';
+  } else {
+    shapeCanvas.style.display = 'none';
+    $('prompt-icon').style.display = 'block';
+    $('prompt-icon').textContent = currentPrompt.icon;
+  }
+
+  $('prompt-text').textContent = currentPrompt.text;
+  $('prompt-sub').textContent = currentPrompt.sub;
+
+  // Voice prompt
+  speak(currentPrompt.voice);
+
+  // Start detecting after a brief pause
+  setTimeout(() => {
+    state = 'detecting';
+    detectStart = Date.now();
+
+    // If shape prompt, start speech recognition
+    if (currentPrompt.type === 'shape') {
+      const shape = SHAPES[currentPrompt.shape];
+      startListening(shape.words, () => triggerSuccess());
+    }
+  }, 800);
+}
+
+function triggerSuccess() {
+  if (state !== 'detecting') return;
+  state = 'celebrating';
+  stopListening();
+  stars++;
+  updateUI();
+
+  showScreen('celebrate');
+  const celebrations = ['🎉','🌟','🎊','💫','🥳','👏'];
+  $('celebrate-emoji').textContent = celebrations[Math.floor(Math.random() * celebrations.length)];
+  const praises = ['Amazing!','Wow!','You did it!','Yay!','Super!','Fantastic!','Great job!'];
+  const praise = praises[Math.floor(Math.random() * praises.length)];
+  $('celebrate-text').textContent = praise;
+
+  // Re-trigger animation
+  $('celebrate-emoji').style.animation = 'none';
+  $('celebrate-emoji').offsetHeight; // reflow
+  $('celebrate-emoji').style.animation = 'celebrateBounce 0.6s ease-out';
+
+  playSuccess();
+  speak(praise);
+  spawnConfetti();
+  drawConfetti();
+
+  setTimeout(() => {
+    round++;
+    nextRound();
+  }, 2500);
+}
+
+function showEncouragement() {
+  if (encourageShown || state !== 'detecting') return;
+  encourageShown = true;
+
+  // Briefly show encouragement overlay
+  $('encourage').style.display = 'block';
+  const phrases = ['You can do it!', 'Try again!', 'Almost!', 'Keep going!'];
+  $('encourage-text').textContent = phrases[Math.floor(Math.random() * phrases.length)];
+  playEncourage();
+  speak($('encourage-text').textContent);
+
+  setTimeout(() => { $('encourage').style.display = 'none'; }, 2000);
+}
+
+function autoAdvance() {
+  if (state !== 'detecting') return;
+  state = 'celebrating';
+  stopListening();
+
+  showScreen('celebrate');
+  $('celebrate-emoji').textContent = '💪';
+  $('celebrate-text').textContent = 'Great try!';
+  $('celebrate-emoji').style.animation = 'none';
+  $('celebrate-emoji').offsetHeight;
+  $('celebrate-emoji').style.animation = 'celebrateBounce 0.6s ease-out';
+
+  speak('Great try! Let\'s do another one!');
+  playEncourage();
+
+  setTimeout(() => {
+    round++;
+    nextRound();
+  }, 2500);
+}
+
+// ─── Detection Loop ──────────────────────────────────────
+async function detectionLoop() {
+  if (state === 'detecting' && currentPrompt) {
+    const elapsed = Date.now() - detectStart;
+
+    // Encouragement at 8s
+    if (elapsed > 8000 && !encourageShown) showEncouragement();
+    // Auto-advance at 15s
+    if (elapsed > 15000) { autoAdvance(); return; }
+
+    const now = performance.now();
+    let detected = false;
+
+    try {
+      if (currentPrompt.type === 'smile' && faceLandmarker) {
+        const result = faceLandmarker.detectForVideo(video, now);
+        if (result.faceLandmarks && detectSmile(result.faceLandmarks)) detected = true;
+      }
+      else if (currentPrompt.type === 'jump' && poseLandmarker) {
+        const result = poseLandmarker.detectForVideo(video, now);
+        if (result.landmarks && detectJump(result.landmarks)) detected = true;
+      }
+      else if (currentPrompt.type === 'fingers' && handLandmarker) {
+        const result = handLandmarker.detectForVideo(video, now);
+        const count = countFingers(result.landmarks);
+        $('detection-dot').title = `Fingers: ${count}`;
+        if (count === currentPrompt.count) detected = true;
+      }
+      // Shape detection handled by speech recognition, no vision needed
+    } catch(e) {}
+
+    // Update detection indicator
+    $('detection-dot').classList.toggle('active', detected);
+
+    if (detected) {
+      triggerSuccess();
+      return;
+    }
+  }
+
+  animFrame = requestAnimationFrame(detectionLoop);
+}
+
+// ─── Init ────────────────────────────────────────────────
+async function init() {
+  resizeConfetti();
+  window.addEventListener('resize', resizeConfetti);
+
+  $('load-status').textContent = 'Requesting camera...';
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+      audio: false
+    });
+    video.srcObject = stream;
+    await video.play();
+  } catch(e) {
+    $('load-status').textContent = 'Camera needed to play! Please allow camera access and reload.';
+    return;
+  }
+
+  $('load-status').textContent = 'Loading face detection...';
+  const vision = await FilesetResolver.forVisionTasks(
+    'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+  );
+
+  faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+    baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task', delegate: 'GPU' },
+    runningMode: 'VIDEO', numFaces: 1, outputFaceBlendshapes: false,
+  });
+
+  $('load-status').textContent = 'Loading hand detection...';
+  handLandmarker = await HandLandmarker.createFromOptions(vision, {
+    baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task', delegate: 'GPU' },
+    runningMode: 'VIDEO', numHands: 2,
+  });
+
+  $('load-status').textContent = 'Loading pose detection...';
+  poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
+    baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task', delegate: 'GPU' },
+    runningMode: 'VIDEO', numPoses: 1,
+  });
+
+  $('load-status').textContent = 'Ready!';
+  $('loading').style.display = 'none';
+  state = 'start';
+
+  // Start detection loop (runs continuously, game state controls what it does)
+  detectionLoop();
+}
+
+// ─── Event Handlers ──────────────────────────────────────
+$('play-btn').addEventListener('click', () => {
+  audioCtx.resume();
+  showScreen(null);
+  $('start-screen').style.display = 'none';
+  startGame();
+});
+
+$('mute-btn').addEventListener('click', () => {
+  muted = !muted;
+  $('mute-btn').innerHTML = muted ? '&#128263;' : '&#128266;';
+  if (muted) speechSynthesis.cancel();
+});
+
+$('restart-btn').addEventListener('click', () => {
+  stopListening();
+  state = 'start';
+  baselineY = null;
+  poseHistory = [];
+  showScreen('start-screen');
+  $('stars').style.display = 'none';
+  $('round-info').style.display = 'none';
+  confettiPieces = [];
+  confettiCtx.clearRect(0, 0, confettiCanvas.width, confettiCanvas.height);
+});
+
+// Go!
+init();
+</script>
+</body>
+</html>
