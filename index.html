@@ -167,6 +167,7 @@ html, body { width: 100%; height: 100%; overflow: hidden; font-family: 'Segoe UI
 <div id="detection-dot"></div>
 
 <div id="controls">
+  <button class="ctrl-btn" id="skip-btn" title="Next" style="display:none; font-size:clamp(1.2rem,3.5vw,1.8rem)">&#9197;</button>
   <button class="ctrl-btn" id="mute-btn" title="Mute">&#128266;</button>
   <button class="ctrl-btn" id="restart-btn" title="Restart">&#8634;</button>
 </div>
@@ -196,6 +197,8 @@ let faceLandmarker, handLandmarker, poseLandmarker;
 let lastFrameTime = 0;
 let recognition = null; // SpeechRecognition instance
 let animFrame = null;
+let micAnalyser = null; // Web Audio analyser for volume
+let micData = null; // Uint8Array for analyser
 
 // ─── Audio ───────────────────────────────────────────────
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -382,25 +385,34 @@ function drawShape(shapeName, color) {
 function getPromptsForLevel(level) {
   const prompts = [];
 
-  // Always available: smile, jump
+  // Level 1: face-based (smile, open mouth, close eyes) + jump
   prompts.push(
-    { type: 'smile', icon: '😊', text: 'Show me a BIG SMILE!', voice: 'Show me a big smile!', sub: '' },
-    { type: 'jump',  icon: '🦘', text: 'Can you JUMP?',       voice: 'Can you jump?',        sub: '' },
+    { type: 'smile',     icon: '😊', text: 'Show me a BIG SMILE!',       voice: 'Show me a big smile!',        sub: '' },
+    { type: 'jump',      icon: '🦘', text: 'Can you JUMP?',              voice: 'Can you jump?',               sub: '' },
+    { type: 'openmouth', icon: '😮', text: 'Open your mouth WIDE!',      voice: 'Open your mouth really wide!', sub: '' },
+    { type: 'closeeyes', icon: '😴', text: 'Close your EYES!',           voice: 'Close your eyes!',            sub: '' },
   );
 
   if (level >= 2) {
-    for (let n = 1; n <= Math.min(3, level >= 4 ? 5 : 3); n++) {
+    // Add fingers 1-3, wave, be loud
+    for (let n = 1; n <= 3; n++) {
       const fingerWord = n === 1 ? 'finger' : 'fingers';
       prompts.push({
         type: 'fingers', count: n,
-        icon: ['','☝️','✌️','🤟','🖖','🖐️'][n],
+        icon: ['','☝️','✌️','🤟'][n],
         text: `Hold up ${n} ${fingerWord}!`,
         voice: `Hold up ${n} ${fingerWord}!`,
         sub: '',
       });
     }
+    prompts.push(
+      { type: 'wave',  icon: '👋', text: 'WAVE hello!',     voice: 'Wave hello!',                sub: '' },
+      { type: 'loud',  icon: '📢', text: 'Be really LOUD!', voice: 'Make some noise! Be loud!',  sub: 'Shout, scream, or sing!' },
+    );
   }
+
   if (level >= 3) {
+    // Shapes, blow, dance
     const shapeKeys = Object.keys(SHAPES);
     for (const k of shapeKeys) {
       prompts.push({
@@ -410,9 +422,15 @@ function getPromptsForLevel(level) {
         sub: `Say "${SHAPES[k].name}"`,
       });
     }
+    prompts.push(
+      { type: 'blow',  icon: '🌬️', text: 'BLOW like the wind!', voice: 'Blow like the wind!',      sub: 'Make an O with your mouth!' },
+      { type: 'dance', icon: '💃', text: 'DANCE! Wiggle around!', voice: 'Dance! Wiggle around!',   sub: '' },
+      { type: 'sing',  icon: '🎤', text: 'SING a song!',         voice: 'Sing me a song! La la la!', sub: 'Make some sounds!' },
+    );
   }
+
   if (level >= 4) {
-    // Add fingers 4-5
+    // Fingers 4-5
     for (let n = 4; n <= 5; n++) {
       prompts.push({
         type: 'fingers', count: n,
@@ -440,42 +458,74 @@ function pickPrompt() {
 }
 
 // ─── Detection Logic ─────────────────────────────────────
-let baselineY = null;
-let poseHistory = [];
+// Per-person pose histories keyed by person index
+let poseHistories = {}; // { personIdx: { samples: [y,...], baseline: number|null } }
+
+function resetJumpState() {
+  poseHistories = {};
+}
 
 function detectSmile(faceLandmarks) {
   if (!faceLandmarks || faceLandmarks.length === 0) return false;
-  const lm = faceLandmarks[0];
-  // Mouth corners: 61 (left), 291 (right)
-  // Upper lip: 13, Lower lip: 14
-  const mouthWidth = Math.abs(lm[291].x - lm[61].x);
-  const mouthHeight = Math.abs(lm[14].y - lm[13].y);
-  const faceWidth = Math.abs(lm[454].x - lm[234].x);
-  const ratio = mouthWidth / faceWidth;
-  // A smile widens the mouth relative to face width
-  return ratio > 0.38 && mouthHeight > 0.01;
+  // Check ALL detected faces -- any smile counts
+  for (const lm of faceLandmarks) {
+    const mouthWidth = Math.abs(lm[291].x - lm[61].x);
+    const mouthHeight = Math.abs(lm[14].y - lm[13].y);
+    const faceWidth = Math.abs(lm[454].x - lm[234].x);
+    if (faceWidth < 0.01) continue;
+    const ratio = mouthWidth / faceWidth;
+    if (ratio > 0.36 && mouthHeight > 0.008) return true;
+  }
+  return false;
+}
+
+function detectJumpForPerson(landmarks, idx) {
+  // Average nose (0) and both shoulders (11,12) for stability
+  const noseY = landmarks[0].y;
+  const lShoulderY = landmarks[11] ? landmarks[11].y : noseY;
+  const rShoulderY = landmarks[12] ? landmarks[12].y : noseY;
+  const y = (noseY + lShoulderY + rShoulderY) / 3;
+
+  if (!poseHistories[idx]) poseHistories[idx] = { samples: [], baseline: null };
+  const ph = poseHistories[idx];
+  ph.samples.push(y);
+  if (ph.samples.length > 45) ph.samples.shift();
+  if (ph.samples.length < 6) return false;
+
+  // Rolling baseline: average of the middle 60% of recent samples (excludes extremes)
+  const sorted = [...ph.samples].sort((a,b) => a - b);
+  const lo = Math.floor(sorted.length * 0.2);
+  const hi = Math.ceil(sorted.length * 0.8);
+  ph.baseline = sorted.slice(lo, hi).reduce((a,b) => a+b, 0) / (hi - lo);
+
+  // Detect upward movement: recent minimum vs baseline
+  const recentMin = Math.min(...ph.samples.slice(-10));
+  const delta = ph.baseline - recentMin;
+
+  // Also check velocity: rapid upward change between consecutive frames
+  const len = ph.samples.length;
+  let maxVelocity = 0;
+  for (let i = Math.max(1, len - 6); i < len; i++) {
+    const v = ph.samples[i-1] - ph.samples[i]; // positive = upward
+    if (v > maxVelocity) maxVelocity = v;
+  }
+
+  // Threshold: 1.5% of frame height OR fast upward velocity
+  const jumped = delta > 0.015 || maxVelocity > 0.012;
+  if (jumped) {
+    ph.samples = [];
+    ph.baseline = null;
+  }
+  return jumped;
 }
 
 function detectJump(poseLandmarks) {
   if (!poseLandmarks || poseLandmarks.length === 0) return false;
-  const lm = poseLandmarks[0];
-  // Use nose (0) or left shoulder (11) Y position
-  const noseY = lm[0].y;
-  poseHistory.push(noseY);
-  if (poseHistory.length > 30) poseHistory.shift();
-
-  if (poseHistory.length < 10) return false;
-
-  // Establish baseline as the average of first frames
-  if (baselineY === null) {
-    baselineY = poseHistory.slice(0, 5).reduce((a,b) => a+b, 0) / 5;
+  // Check ALL detected poses -- any jump counts
+  for (let i = 0; i < poseLandmarks.length; i++) {
+    if (detectJumpForPerson(poseLandmarks[i], i)) return true;
   }
-
-  // Detect upward movement (Y decreases = up in normalized coords)
-  const recentMin = Math.min(...poseHistory.slice(-8));
-  const jump = baselineY - recentMin > 0.04; // ~4% of frame height
-  if (jump) { baselineY = null; poseHistory = []; }
-  return jump;
+  return false;
 }
 
 function countFingers(handLandmarks) {
@@ -483,17 +533,13 @@ function countFingers(handLandmarks) {
   let total = 0;
   for (const hand of handLandmarks) {
     let fingers = 0;
-    // Thumb: compare tip (4) x to IP (3) x (depends on hand side)
-    // For simplicity, check if thumb tip is far from palm
     const thumbTip = hand[4];
     const thumbIp = hand[3];
     const wrist = hand[0];
     const indexMcp = hand[5];
-    // Determine hand orientation
-    const isRight = indexMcp.x < wrist.x; // roughly
+    const isRight = indexMcp.x < wrist.x;
     if (isRight ? (thumbTip.x < thumbIp.x) : (thumbTip.x > thumbIp.x)) fingers++;
 
-    // Other fingers: tip Y < PIP Y (tip is above PIP = extended)
     const tips = [8, 12, 16, 20];
     const pips = [6, 10, 14, 18];
     for (let i = 0; i < 4; i++) {
@@ -502,6 +548,106 @@ function countFingers(handLandmarks) {
     total += fingers;
   }
   return total;
+}
+
+function getMicVolume() {
+  if (!micAnalyser || !micData) return 0;
+  micAnalyser.getByteTimeDomainData(micData);
+  let sum = 0;
+  for (let i = 0; i < micData.length; i++) {
+    const v = (micData[i] - 128) / 128;
+    sum += v * v;
+  }
+  return Math.sqrt(sum / micData.length); // RMS 0..1
+}
+
+function detectOpenMouth(faceLandmarks) {
+  if (!faceLandmarks || faceLandmarks.length === 0) return false;
+  for (const lm of faceLandmarks) {
+    const upperLip = lm[13].y;
+    const lowerLip = lm[14].y;
+    const faceHeight = Math.abs(lm[10].y - lm[152].y); // forehead to chin
+    if (faceHeight < 0.01) continue;
+    const openness = (lowerLip - upperLip) / faceHeight;
+    if (openness > 0.15) return true;
+  }
+  return false;
+}
+
+function detectCloseEyes(faceLandmarks) {
+  if (!faceLandmarks || faceLandmarks.length === 0) return false;
+  for (const lm of faceLandmarks) {
+    // Left eye: top 159, bottom 145. Right eye: top 386, bottom 374.
+    const leftOpen = Math.abs(lm[159].y - lm[145].y);
+    const rightOpen = Math.abs(lm[386].y - lm[374].y);
+    const faceHeight = Math.abs(lm[10].y - lm[152].y);
+    if (faceHeight < 0.01) continue;
+    const leftRatio = leftOpen / faceHeight;
+    const rightRatio = rightOpen / faceHeight;
+    if (leftRatio < 0.018 && rightRatio < 0.018) return true;
+  }
+  return false;
+}
+
+function detectBlow(faceLandmarks) {
+  if (!faceLandmarks || faceLandmarks.length === 0) return false;
+  for (const lm of faceLandmarks) {
+    // Pursed lips: mouth narrow width + slightly open
+    const mouthWidth = Math.abs(lm[291].x - lm[61].x);
+    const mouthOpen = Math.abs(lm[14].y - lm[13].y);
+    const faceWidth = Math.abs(lm[454].x - lm[234].x);
+    if (faceWidth < 0.01) continue;
+    const widthRatio = mouthWidth / faceWidth;
+    const faceHeight = Math.abs(lm[10].y - lm[152].y);
+    const openRatio = mouthOpen / faceHeight;
+    // Pursed: narrow but open (like an "O")
+    if (widthRatio < 0.28 && openRatio > 0.04) return true;
+  }
+  return false;
+}
+
+let waveHistory = []; // track hand x positions
+function detectWave(handLandmarks) {
+  if (!handLandmarks || handLandmarks.length === 0) { waveHistory = []; return false; }
+  const x = handLandmarks[0][0].x; // wrist x of first hand
+  waveHistory.push(x);
+  if (waveHistory.length > 30) waveHistory.shift();
+  if (waveHistory.length < 12) return false;
+  // Count direction changes (zigzag = wave)
+  let changes = 0;
+  for (let i = 2; i < waveHistory.length; i++) {
+    const d1 = waveHistory[i-1] - waveHistory[i-2];
+    const d2 = waveHistory[i] - waveHistory[i-1];
+    if (d1 * d2 < 0 && Math.abs(d2) > 0.005) changes++;
+  }
+  if (changes >= 3) { waveHistory = []; return true; }
+  return false;
+}
+
+let danceHistory = []; // track overall body movement
+function detectDance(poseLandmarks) {
+  if (!poseLandmarks || poseLandmarks.length === 0) return false;
+  // Sum movement of multiple joints across all people
+  let movement = 0;
+  for (const lm of poseLandmarks) {
+    const points = [0, 11, 12, 15, 16]; // nose, shoulders, wrists
+    const snapshot = points.map(i => ({ x: lm[i].x, y: lm[i].y }));
+    danceHistory.push(snapshot);
+  }
+  if (danceHistory.length > 30) danceHistory.splice(0, danceHistory.length - 30);
+  if (danceHistory.length < 10) return false;
+  // Measure total movement in recent frames
+  for (let i = 1; i < danceHistory.length; i++) {
+    for (let j = 0; j < danceHistory[i].length; j++) {
+      if (danceHistory[i-1][j]) {
+        const dx = danceHistory[i][j].x - danceHistory[i-1][j].x;
+        const dy = danceHistory[i][j].y - danceHistory[i-1][j].y;
+        movement += Math.sqrt(dx*dx + dy*dy);
+      }
+    }
+  }
+  if (movement > 0.8) { danceHistory = []; return true; }
+  return false;
 }
 
 // ─── Game Flow ───────────────────────────────────────────
@@ -528,6 +674,9 @@ function updateUI() {
 function nextRound() {
   currentPrompt = pickPrompt();
   encourageShown = false;
+  resetJumpState();
+  waveHistory = [];
+  danceHistory = [];
   updateUI();
 
   // Show prompt
@@ -555,6 +704,9 @@ function nextRound() {
   // Voice prompt
   speak(currentPrompt.voice);
 
+  // Show skip button
+  $('skip-btn').style.display = 'flex';
+
   // Start detecting after a brief pause
   setTimeout(() => {
     state = 'detecting';
@@ -574,6 +726,7 @@ function triggerSuccess() {
   stopListening();
   stars++;
   updateUI();
+  $('skip-btn').style.display = 'none';
 
   showScreen('celebrate');
   const celebrations = ['🎉','🌟','🎊','💫','🥳','👏'];
@@ -616,6 +769,7 @@ function autoAdvance() {
   if (state !== 'detecting') return;
   state = 'celebrating';
   stopListening();
+  $('skip-btn').style.display = 'none';
 
   showScreen('celebrate');
   $('celebrate-emoji').textContent = '💪';
@@ -651,15 +805,41 @@ async function detectionLoop() {
         const result = faceLandmarker.detectForVideo(video, now);
         if (result.faceLandmarks && detectSmile(result.faceLandmarks)) detected = true;
       }
+      else if (currentPrompt.type === 'openmouth' && faceLandmarker) {
+        const result = faceLandmarker.detectForVideo(video, now);
+        if (result.faceLandmarks && detectOpenMouth(result.faceLandmarks)) detected = true;
+      }
+      else if (currentPrompt.type === 'closeeyes' && faceLandmarker) {
+        const result = faceLandmarker.detectForVideo(video, now);
+        if (result.faceLandmarks && detectCloseEyes(result.faceLandmarks)) detected = true;
+      }
+      else if (currentPrompt.type === 'blow' && faceLandmarker) {
+        const result = faceLandmarker.detectForVideo(video, now);
+        if (result.faceLandmarks && detectBlow(result.faceLandmarks)) detected = true;
+      }
       else if (currentPrompt.type === 'jump' && poseLandmarker) {
         const result = poseLandmarker.detectForVideo(video, now);
         if (result.landmarks && detectJump(result.landmarks)) detected = true;
+      }
+      else if (currentPrompt.type === 'dance' && poseLandmarker) {
+        const result = poseLandmarker.detectForVideo(video, now);
+        if (result.landmarks && detectDance(result.landmarks)) detected = true;
       }
       else if (currentPrompt.type === 'fingers' && handLandmarker) {
         const result = handLandmarker.detectForVideo(video, now);
         const count = countFingers(result.landmarks);
         $('detection-dot').title = `Fingers: ${count}`;
         if (count === currentPrompt.count) detected = true;
+      }
+      else if (currentPrompt.type === 'wave' && handLandmarker) {
+        const result = handLandmarker.detectForVideo(video, now);
+        if (result.landmarks && detectWave(result.landmarks)) detected = true;
+      }
+      else if (currentPrompt.type === 'loud' || currentPrompt.type === 'sing') {
+        const vol = getMicVolume();
+        $('detection-dot').title = `Vol: ${vol.toFixed(3)}`;
+        const threshold = currentPrompt.type === 'loud' ? 0.15 : 0.08;
+        if (vol > threshold) detected = true;
       }
       // Shape detection handled by speech recognition, no vision needed
     } catch(e) {}
@@ -694,6 +874,19 @@ async function init() {
     return;
   }
 
+  $('load-status').textContent = 'Setting up microphone...';
+  try {
+    const micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    const micSource = audioCtx.createMediaStreamSource(micStream);
+    micAnalyser = audioCtx.createAnalyser();
+    micAnalyser.fftSize = 256;
+    micAnalyser.smoothingTimeConstant = 0.3;
+    micSource.connect(micAnalyser);
+    micData = new Uint8Array(micAnalyser.frequencyBinCount);
+  } catch(e) {
+    // Mic not available -- volume-based prompts will auto-pass
+  }
+
   $('load-status').textContent = 'Loading face detection...';
   const vision = await FilesetResolver.forVisionTasks(
     'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
@@ -701,19 +894,19 @@ async function init() {
 
   faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
     baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task', delegate: 'GPU' },
-    runningMode: 'VIDEO', numFaces: 1, outputFaceBlendshapes: false,
+    runningMode: 'VIDEO', numFaces: 4, outputFaceBlendshapes: false,
   });
 
   $('load-status').textContent = 'Loading hand detection...';
   handLandmarker = await HandLandmarker.createFromOptions(vision, {
     baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task', delegate: 'GPU' },
-    runningMode: 'VIDEO', numHands: 2,
+    runningMode: 'VIDEO', numHands: 4,
   });
 
   $('load-status').textContent = 'Loading pose detection...';
   poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
     baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task', delegate: 'GPU' },
-    runningMode: 'VIDEO', numPoses: 1,
+    runningMode: 'VIDEO', numPoses: 4,
   });
 
   $('load-status').textContent = 'Ready!';
@@ -741,13 +934,26 @@ $('mute-btn').addEventListener('click', () => {
 $('restart-btn').addEventListener('click', () => {
   stopListening();
   state = 'start';
-  baselineY = null;
-  poseHistory = [];
+  resetJumpState();
+  waveHistory = [];
+  danceHistory = [];
+  $('skip-btn').style.display = 'none';
   showScreen('start-screen');
   $('stars').style.display = 'none';
   $('round-info').style.display = 'none';
   confettiPieces = [];
   confettiCtx.clearRect(0, 0, confettiCanvas.width, confettiCanvas.height);
+});
+
+$('skip-btn').addEventListener('click', () => {
+  if (state === 'detecting' || state === 'prompting') {
+    stopListening();
+    $('skip-btn').style.display = 'none';
+    state = 'celebrating';
+    round++;
+    // Quick transition, no fanfare
+    setTimeout(() => nextRound(), 300);
+  }
 });
 
 // Go!
